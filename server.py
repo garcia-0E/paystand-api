@@ -1,20 +1,18 @@
 import requests
+import uuid
 from datetime import datetime
 from sanic import Sanic
 from sanic.response import json
+from sanic.log import logger
 from sanic_cors import CORS, cross_origin
 from sanic.handlers import ErrorHandler
 from sanic.exceptions import SanicException
-from sanic_jwt_extended import (
-    JWTManager, jwt_required, create_access_token,
-    create_refresh_token)
-from sanic_jwt_extended.exceptions import JWTExtendedException
-from sanic_jwt_extended.tokens import Token
 from motor.motor_asyncio import AsyncIOMotorClient
 from sanic.exceptions import ServerError
 from sanic_openapi import swagger_blueprint
 from sanic_openapi import doc
 from sanic_compress import Compress
+
 
 class CustomHandler(ErrorHandler):
     def default(self, request, exception):
@@ -22,10 +20,9 @@ class CustomHandler(ErrorHandler):
         return json('NO',501)  
 
 app = Sanic(__name__)
-PORT = 7777
+PORT = 5555
 handler = CustomHandler()
 app.error_handler = handler
-jwt = JWTManager(app)
 app.blueprint(swagger_blueprint)
 CORS(app, automatic_options=True)
 Compress(app)
@@ -35,8 +32,6 @@ app.config.API_BASEPATH="/"
 app.config.API_SCHEMES = ["http"]
 app.config.API_VERSION = '1.0.0'
 app.config.API_TITLE = 'Paystand Integration'
-app.config.JWT_SECRET_KEY = "af8f6225-ec38-4bf3-b40c-29642ccd6312"
-app.config.JWT_ACCESS_TOKEN_EXPIRES = False
 app.config.SWAGGER_UI_CONFIGURATION = {
     'validatorUrl': None,  # Disable Swagger validator
     'displayRequestDuration': True,
@@ -47,16 +42,34 @@ app.config.API_SECURITY = [{"OAuth2": []}]
 app.config.API_SECURITY_DEFINITIONS = {
     "OAuth2": {
         "type": "oauth2",
-        "flow": "application",
+        "flow": "application", 
+        "in": "header", 
+        "name": "Authorization",
         "tokenUrl": "https://api.paystand.co/v3/oauth/token",
-        "scopes": {"client_credentials": "Grants access to this API"},
+        "scopes": "auth"
     }
 }
-
+############################## MONGO CONNECTION ############################
+def get_mongo_conn():
+    MONGO_CONFIG = {
+    "MONGO_HOST" : "35.221.170.100",
+    "MONGO_PORT" : 27030,
+    "MONGO_DB" : "paystand",
+    #
+     "MONGO_USER" : "paystand",
+     "MONGO_PASSWORD" : "p4yst4nd..$",
+    }
+    client = {}
+    mongo_uri = "mongodb://"+str(MONGO_CONFIG['MONGO_USER'])+":"+MONGO_CONFIG['MONGO_PASSWORD']+"@"+MONGO_CONFIG['MONGO_HOST']+":"+str(MONGO_CONFIG['MONGO_PORT'])+"/paystand"
+    # mongo_uri = "mongodb://"+str(MONGO_CONFIG['MONGO_USER'])+":"+MONGO_CONFIG['MONGO_PASSWORD']+"@"+MONGO_CONFIG['MONGO_HOST']+":"+str(MONGO_CONFIG['MONGO_PORT'])+"/admin"
+    client = AsyncIOMotorClient(mongo_uri)
+    logger.info('Conectado a MongoDB...')
+    return client['paystand']
 ############################## YAPILY KEYS #################################
 
 APPLICATION_ID = "be32eb84-9045-4a8f-83e5-ccd24bdd9ec3" # YAPILY
 APPLICATION_SECRET = "63d3f375-35c2-4cae-a5b1-9651248bfb23" # YAPILY
+
 
 ############################## PAYSTAND CLASSES ############################
 class Address:
@@ -74,13 +87,9 @@ class Contact:
     phone = doc.String("Client phone")
     dateOfBirth = doc.String("Client birth date")
 
-class Settings: 
-    enabled = doc.Boolean("Events enabled")
-    urls = doc.List("URLS for events to be sent to.")
-
 class AdditionalOwner: 
-    id = doc.String("The unique identifier for the additional owner.")
-    object = doc.String("Value is legalEntityAdditionalOwner")
+    # id = doc.String("The unique identifier for the additional owner.")
+    # object = doc.String("Value is legalEntityAdditionalOwner")
     personalTaxId = doc.String("The personal tax id of the owner")
     last4PersonalTaxId = doc.String("The last 4 digits of the personal tax id of the owner. This is returned in responses instead of returning the full personal tax id.")
     stakePercent = doc.String("The stake percentage in the company for the additional owner.")
@@ -106,8 +115,8 @@ class LegalEntity:
     additionalOwners = doc.Object(AdditionalOwner,"Any additional owners of the entity.")
 
 class Bank: 
-    id = doc.String("The unique identifier for the bank.")
-    object = doc.String("Value is bank.")
+    # id = doc.String("The unique identifier for the bank.")
+    # object = doc.String("Value is bank.")
     accountType = doc.String("The account type of the bank.")
     bankName = doc.String("The bank name.")
     routingNumber = doc.String("The bank routing number.")
@@ -116,17 +125,7 @@ class Bank:
     accountHolderType = doc.String("The account holder type for the bank")
     currency = doc.String("The currency of the bank")
     country = doc.String("The country for the bank")
-    last4 = doc.String("The last four digits of the account number")
-    fingerprint = doc.String("The unique identifier for the routing and account number.")
-    isDefault = doc.Boolean("Is a default bank")
-    isApDefault = doc.Boolean("Is a default AP bank")
     billingAddress = doc.Object(Address,"The billing address associated with the bank")
-    externalId = doc.String("An external id for the bank.")
-    dropped = doc.Boolean("Has the bank been two-dropped")
-    verified = doc.Boolean("verified")
-    status = doc.String("Possible values: active, inactive. Active: The bank is active and able to be used to make payments, Inactive: The bank is not active and is unable to be used to make payments.")
-    created = doc.Date("The date the bank was created")
-    lastUpdated = doc.Date("The date the bank was last updated.")
 
 class Merchant: 
     businessName = doc.String("The name of the business.")
@@ -162,12 +161,38 @@ class TokenReq:
     client_id = doc.String("Provided by Paystand")
     client_secret = doc.String("Provided by Paystand")
     scope = doc.String("auth")
+
+class AmountVerification:
+    customerName = doc.String("Customer that wants to be verified")
+    amounts = doc.List("Amounts that were dropped")
+
+class Payer:
+    name = doc.String("The name of the payer.")
+    email = doc.String('The email of the payer.')
+    address = doc.Object(Address, "The address of the payer")
+
+class PayerBank:
+    payer_id = doc.String("The id of the payer that bank will be added")
+    bank = doc.Object(Bank,"Bank object")
+
+class Card:
+    nameOnCard = doc.String('The name on the card')
+    cardNumber = doc.String('The number of the card')
+    expirationMonth = doc.String('The expiration month of the card.')
+    expirationYear = doc.String('The expiration year of the card.')
+    securityCode = doc.String('The security code of the card.')
+    billingAddress = doc.Object(Address,'The billing address associated with the card.')
+
+class PayerCardPayment:
+    amount = doc.String("The amount of the payment")
+    currency = doc.String('The currency of the payment')
+    card = doc.Object(Card,'Card object that will be used')
 ########################################### ENDPOINTS ####################################################### 
 
 @doc.tag("Create Paystand network access token")
 @doc.summary("Access Token format is Bearer: token")
-@doc.consumes(TokenReq)
-@app.route("/paystand/token")
+@doc.consumes(TokenReq, location="body", content_type='application/json')
+@app.route("/paystand/token",['POST'])
 
 async def get_accesstoken(request):
     data = request.json
@@ -176,23 +201,108 @@ async def get_accesstoken(request):
 
 @doc.tag("Create Customer")
 @doc.summary("Create customer to use Paystand network: A customer can send and receive payments, create and track receivables, manage their accounts, withdrawal funds.")
-@doc.consumes(CustomerReg)
-@app.route("/paystand/customer")
-async def customer(request,token : Token):
+@doc.consumes(CustomerReg,location="body", content_type='application/json',)
+@app.route("/paystand/customer",['POST'])
+async def customer(request):
     data = request.json
-    return json({"hello": "world"})
+    db = get_mongo_conn()
 
-@app.route("/yapily/ach2")
-async def test1(request):
-  return json({"hello": "world"})
+    customer = {
+        "defaultBank":data['defaultBank'],
+        "name":data['name'],
+        "email":data['email']
+    }
 
-@app.route("/yapily/ach3")
-async def test2(request):
-  return json({"hello": "world"})
+    r = requests.post("https://api.paystand.co/v3/customers/accounts",data,headers=request.header)
+    if r.content['account']:
+        customer['bank_id'] = r.content['id']
+        await db.customer.insert_one(customer)
+        logger.info("Comercio añadido con éxito")
+        return json({'msg':'success',
+                    'data':r.content})
+    return json('ERROR')
 
-@app.route("/yapily/ach")
-async def test3(request):
-  return json({"hello": "world"})
+
+@doc.tag("Drop amounts")
+@doc.summary("Drop amounts for Bank account verification")
+@doc.consumes(doc.String('customer Name', name='customerName'))
+@app.route("/dropAmounts",['POST'])
+async def dropAmounts(request):
+    data = request.json
+    db = get_mongo_conn()
+
+    customer = db.customer.find_one({'name':data['customerName']},{'_id':0,'id':1})
+
+    r = requests.post("https://api.paystand.co/v3/banks/{bank}/drops".format(bank=customer['id']))
+    if (r.content['dropped']):
+        return json('Succesfully dropped')
+    return json('ERROR')
+
+@doc.tag("Verificate Account")
+@doc.summary("Bank account verification")
+@doc.consumes(AmountVerification, location="body", content_type='application/json')
+@app.route("/verificateAmounts",['POST'])
+async def verifyAmounts(request):
+    data = request.json
+    db = get_mongo_conn()
+
+    customer = db.customer.find_one({'name':data['customerName']},{'_id':0,'id':1})
+
+    r = requests.post("https://api.paystand.co/v3/banks/{bank}/drops".format(bank=customer['id']),data['amounts'])
+    if (r.content['verified']):
+        return json('Succesfully verified')
+    return json('ERROR')
+
+@doc.tag("Create Payer")
+@doc.summary("Payers are people or businesses that are able to pay a customer. Payers can hold cards and banks that can be used to create future payments. ")
+@doc.consumes(Payer,location="body", content_type='application/json')
+@app.route("/payer",['POST'])
+async def payer(request):
+    data = request.json
+    db = get_mongo_conn()
+
+    r = requests.post("https://api.paystand.com/v3/payers",data=data)
+    
+    if (r.content['id']):
+        data['id'] = r.content['id']
+        data['status'] = r.content['status']
+        await db.payer.insert_one(data)
+        return json({'msg':'success',
+                     'data':data})
+    return json('ERROR')
+
+@doc.tag("Create Payer bank")
+@doc.summary("Payer banks belong to specific payers and can be used to make payments.")
+@doc.consumes(PayerBank,location="body", content_type='application/json')
+@app.route("/payer/bank",['POST'])
+async def payer_bank(request):
+    data = request.json
+    db = get_mongo_conn()
+
+    bank_data = data['bank']
+    payer = await db.payer.find_one({'id':data['payer_id']},{'_id':0})
+    
+    r = requests.post("api.paystand.com/v3/payers/{id}/banks".format(id=payer['id']),data=bank_data)
+    
+    if (r.content['object'] == 'bank'):
+        await db.payer.update_one({'id':payer['id']} , {'$set': {'bank':r.content}})
+        return json({'msg':'success',
+                     'data':payer})
+    return json('ERROR')
+
+@doc.tag("Create payer card payment")
+@doc.summary("The payment resource allows you to accept Card and Bank account payments.")
+@doc.consumes(PayerCardPayment,location="body", content_type='application/json')
+@app.route("/payer/card",['POST'])
+async def payer_card(request):
+    data = request.json
+    r = requests.post('https://api.paystand.co/v3/payments/secure',data = data)
+
+    if (r.content['object'] == 'payment'):
+        return json({'msg':'success',
+                     'data':r.content})
+    return json('ERROR')
+
 
 if __name__ == "__main__":
   app.run(host="0.0.0.0", port=PORT)
